@@ -1,0 +1,13 @@
+__pycache__/
+build/
+dist/
+*.spec.bak
+# Written by speech_win.py at startup
+speak.ps1
+listen.ps1
+voices.ps1
+# Sjeng's learning files, created while playing
+engine/*.lrn
+# Sjeng build output
+sjeng_src/*.obj
+sjeng_src/sjeng.exe
