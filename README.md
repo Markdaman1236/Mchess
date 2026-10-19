@@ -77,7 +77,7 @@ The slider in **New Game** and **Preferences** goes from 1 (faster) to 12 (stron
 
 The computer always waits at least two seconds after your move before replying, as the Mac version does.
 
-Apple's copy of Sjeng contains a bug: it ignores the search-depth command, so every difficulty level plays at the same depth. This port fixes that one line so the levels work as intended. See [`sjeng_src/README.txt`](sjeng_src/README.txt).
+Apple's copy of Sjeng contains a bug: it ignores the search-depth command, so on the Mac every difficulty level probably plays at the same depth. This port fixes that one line so the levels work as intended. See [`sjeng_src/README.txt`](sjeng_src/README.txt).
 
 ## Running and building from source
 
