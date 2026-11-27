@@ -49,46 +49,40 @@ $synth.GetInstalledVoices() | ForEach-Object { Write-Output $_.VoiceInfo.Name }
 
 LISTEN.write_text(
     """
+param([string]$Grammar)
 Add-Type -AssemblyName System.Speech
 try {
     $engine = New-Object System.Speech.Recognition.SpeechRecognitionEngine
     $engine.SetInputToDefaultAudioDevice()
 } catch {
-    Write-Output 'LISTEN_OFF'
+    [Console]::Out.WriteLine('LISTEN_OFF')
     exit 0
 }
-function Choices($items) {
-    $c = New-Object System.Speech.Recognition.Choices
-    foreach ($item in $items) { [void]$c.Add($item) }
-    return $c
+# The phrase file is rewritten for every position, like
+# -[MBCInteractivePlayer doUpdateNeedMouse] rebuilding its language model
+# from the legal moves. An empty file means: not listening right now.
+$stamp = -1
+while ($true) {
+    if (-not (Test-Path -LiteralPath $Grammar)) { exit 0 }
+    $now = (Get-Item -LiteralPath $Grammar).LastWriteTimeUtc.Ticks
+    if ($now -ne $stamp) {
+        $stamp = $now
+        $engine.UnloadAllGrammars()
+        $lines = @(Get-Content -LiteralPath $Grammar -Encoding UTF8 | Where-Object { $_ })
+        if ($lines.Count -gt 0) {
+            $choices = New-Object System.Speech.Recognition.Choices
+            foreach ($line in $lines) { [void]$choices.Add($line) }
+            $builder = New-Object System.Speech.Recognition.GrammarBuilder($choices)
+            $engine.LoadGrammar((New-Object System.Speech.Recognition.Grammar($builder)))
+        }
+    }
+    if ($engine.Grammars.Count -eq 0) { Start-Sleep -Milliseconds 200; continue }
+    try { $result = $engine.Recognize([TimeSpan]::FromMilliseconds(500)) } catch { $result = $null }
+    if ($result -and $result.Text) {
+        [Console]::Out.WriteLine($result.Text)
+        [Console]::Out.Flush()
+    }
 }
-$files = Choices @('a','b','c','d','e','f','g','h')
-$ranks = Choices @('1','2','3','4','5','6','7','8')
-$pieces = Choices @('pawn','knight','bishop','rook','queen','king')
-$move = New-Object System.Speech.Recognition.GrammarBuilder
-$move.Append($pieces)
-$move.Append($files)
-$move.Append($ranks)
-$move.Append((Choices @('to','takes')))
-$move.Append($files)
-$move.Append($ranks)
-$engine.LoadGrammar((New-Object System.Speech.Recognition.Grammar($move)))
-$drop = New-Object System.Speech.Recognition.GrammarBuilder
-$drop.Append('drop')
-$drop.Append((Choices @('pawn','knight','bishop','rook','queen')))
-$drop.Append('at')
-$drop.Append($files)
-$drop.Append($ranks)
-$engine.LoadGrammar((New-Object System.Speech.Recognition.Grammar($drop)))
-$other = New-Object System.Speech.Recognition.GrammarBuilder
-$other.Append((Choices @('castle kingside','castle king side','castle queenside','castle queen side','take back move')))
-$engine.LoadGrammar((New-Object System.Speech.Recognition.Grammar($other)))
-$engine.RecognizeAsync([System.Speech.Recognition.RecognizeMode]::Multiple)
-Register-ObjectEvent -InputObject $engine -EventName SpeechRecognized -Action {
-    $text = $Event.SourceEventArgs.Result.Text
-    if ($text) { Write-Output $text }
-} | Out-Null
-while ($true) { Start-Sleep -Seconds 1 }
 """.strip(),
     encoding="utf-8",
 )
@@ -164,17 +158,38 @@ class Speaker:
 
 
 class Listener:
+    """Speech recognition limited to the phrases set_phrases() last gave."""
+
     def __init__(self) -> None:
+        import os
+        import tempfile
         self.proc: subprocess.Popen | None = None
         self.queue: list[str] = []
         self._lock = threading.Lock()
+        self._phrases: list[str] | None = None
+        self.grammar = Path(tempfile.gettempdir()) / f"chess-speech-{os.getpid()}.txt"
+
+    def set_phrases(self, phrases: list[str]) -> None:
+        """Listen for exactly these phrases; an empty list pauses listening."""
+        if phrases == self._phrases:
+            return
+        self._phrases = list(phrases)
+        temp = self.grammar.with_suffix(".tmp")
+        try:
+            temp.write_text("\n".join(phrases) + ("\n" if phrases else ""), encoding="utf-8")
+            temp.replace(self.grammar)
+        except OSError:
+            pass
 
     def start(self) -> None:
         if self.proc is not None and self.proc.poll() is None:
             return
+        if self._phrases is None:
+            self.set_phrases([])
         try:
             self.proc = subprocess.Popen(
-                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(LISTEN)],
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(LISTEN),
+                 "-Grammar", str(self.grammar)],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
@@ -207,3 +222,11 @@ class Listener:
         if self.proc is not None and self.proc.poll() is None:
             self.proc.terminate()
         self.proc = None
+
+    def close(self) -> None:
+        self.stop()
+        for path in (self.grammar, self.grammar.with_suffix(".tmp")):
+            try:
+                path.unlink()
+            except OSError:
+                pass

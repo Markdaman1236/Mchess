@@ -27,4 +27,6 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
+    # Resources/Chess.ico is Apple's AppIcon.icns converted for Windows.
+    icon=os.path.join(here, 'Resources', 'Chess.ico'),
 )

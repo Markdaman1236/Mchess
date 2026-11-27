@@ -110,6 +110,64 @@ def display_move(pos: Position, move: Move) -> str:
     return origin + operation + dest + mark
 
 
+def move_parts(pos: Position, move: Move) -> tuple[str, str, str]:
+    """-[MBCMove origin], operation and destination: the game log columns.
+
+    Castling has only an operation ("0 - 0"); the destination then holds
+    just the check mark. Otherwise a check mark follows the destination
+    after a space (dest_check_fmt "%@ %@").
+    """
+    check, mate = check_state(pos, move)
+    mark = "≠" if mate else ("+" if check else "")
+    if move.castle:
+        return "", ("0 - 0" if move.castle == 2 else "0 - 0 - 0"), mark
+    dest = "abcdefgh"[file_of(move.to)] + str(rank_of(move.to) + 1)
+    if move.promo:
+        dest += "=" + LETTER[move.promo]
+    if mark:
+        dest += " " + mark
+    if move.kind == 2:
+        return LETTER[kind_of(move.piece)], "@", dest
+    origin = (" " if kind_of(move.piece) == PAWN else LETTER[kind_of(move.piece)])
+    origin += "abcdefgh"[file_of(move.fr)] + str(rank_of(move.fr) + 1)
+    return origin, "×" if is_capture(move) else "-", dest
+
+
+def speech_phrases(pos: Position, takeback: bool) -> list[str]:
+    """The phrases -[MBCLanguageModel buildLanguageModel:fromMoves:takeback:]
+    accepts for the side to move: "<piece> e 2 to|takes e 4 [promoting to
+    <piece>]", "castle king|queen side", "drop <piece> at <square>", and
+    "take back move" / "undo" when a takeback is possible."""
+    phrases: list[str] = []
+    seen = set()
+
+    def add(text: str) -> None:
+        if text not in seen:
+            seen.add(text)
+            phrases.append(text)
+
+    def square(sq: int) -> str:
+        return f"{'abcdefgh'[file_of(sq)]} {rank_of(sq) + 1}"
+
+    for move in pos.legal_moves():
+        if move.castle:
+            add("castle king side" if move.castle == 2 else "castle queen side")
+        elif move.kind == 2:
+            add(f"drop {PIECE_WORD[kind_of(move.piece)]} at {square(move.to)}")
+        else:
+            for verb in ("to", "takes"):
+                base = f"{PIECE_WORD[kind_of(move.piece)]} {square(move.fr)} {verb} {square(move.to)}"
+                if move.promo:
+                    add(base)
+                    add(f"{base} promoting to {PIECE_WORD[move.promo]}")
+                else:
+                    add(base)
+    if takeback:
+        add("take back move")
+        add("undo")
+    return phrases
+
+
 def engine_move(move: Move) -> str:
     """-[MBCMove engineMove], the text Sjeng reads and .game files store."""
     if move.kind == 2:
@@ -173,6 +231,11 @@ def find_spoken(pos: Position, phrase: str) -> Move | None:
     found = [m for m in pos.legal_moves() if m.kind == 1 and m.fr == fr and m.to == to and kind_of(m.piece) == kind]
     if not found:
         return None
+    promoted = re.search(r"promoting to (\w+)", text)
+    if promoted and promoted.group(1) in names:
+        for move in found:
+            if move.promo == names[promoted.group(1)]:
+                return move
     for move in found:
         if move.promo in (0, QUEEN):
             return move

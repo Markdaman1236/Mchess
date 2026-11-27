@@ -37,7 +37,15 @@ DEFAULTS = {
     "country": "",              # MBCGameCountry
     "event": "Casual Game",     # MBCGameEvent
     "recent": [],               # Open Recent
+    "window_frame": "",         # NSWindow Frame MBCMainWindowFrame
+    "window_zoomed": False,
+    # The windows open when Chess quit, reopened on the next launch the way
+    # NSDocument restores autosaved documents: [{"file": ..., "doc": ...}].
+    "sessions": [],
 }
+
+# One autosaved .game per window listed in "sessions".
+AUTOSAVE_DIR = PATH.with_name("Autosave")
 
 
 def load() -> dict:

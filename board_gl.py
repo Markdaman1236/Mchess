@@ -131,6 +131,15 @@ GL_CONSTANT_ATTENUATION = 0x1207
 GL_QUADRATIC_ATTENUATION = 0x1209
 GL_ALPHA = 0x1906
 GL_UNPACK_ALIGNMENT = 0x0CF5
+GL_DEPTH_COMPONENT = 0x1902
+GL_FLOAT = 0x1406
+GL_VIEWPORT = 0x0BA2
+GL_MODELVIEW_MATRIX = 0x0BA6
+GL_PROJECTION_MATRIX = 0x0BA7
+IDC_ARROW = 32512
+IDC_HAND = 32649
+# kSyntheticSquare: anything at or above it is not a board square.
+SYNTHETIC_SQUARE = 0x70
 
 # Rules piece code to the original's display list (generateModelLists).
 MESH_LIST = {1: 2, 2: 1}
@@ -300,6 +309,10 @@ class GL:
         self.glTexParameterf = _bind(self.gl, "glTexParameterf", None, u, u, f)
         self.glGetIntegerv = _bind(self.gl, "glGetIntegerv", None, u, p)
         self.glGetFloatv = _bind(self.gl, "glGetFloatv", None, u, p)
+        self.glGetDoublev = _bind(self.gl, "glGetDoublev", None, u, p)
+        self.gluUnProject = _bind(self.glu, "gluUnProject", i, d, d, d, p, p, p, p, p, p)
+        self.GetCursorPos = _bind(self.user, "GetCursorPos", i, p)
+        self.WindowFromPoint = _bind(self.user, "WindowFromPoint", p, wintypes.POINT)
         self.glGetString = _bind(self.gl, "glGetString", ctypes.c_char_p, u)
         self.gluPerspective = _bind(self.glu, "gluPerspective", None, d, d, d, d)
         self.gluLookAt = _bind(self.glu, "gluLookAt", None, d, d, d, d, d, d, d, d, d)
@@ -412,7 +425,11 @@ class GL:
             raise RuntimeError("OpenGL context was not created")
         interval = self.wglGetProcAddress(b"wglSwapIntervalEXT")
         if interval:
-            ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_int)(interval)(1)
+            # No vsync: the desktop compositor already keeps a windowed GL
+            # surface from tearing, and with vsync on, SwapBuffers on this
+            # child window blocked for ~250 ms a frame on some drivers
+            # (Radeon Pro 560), so animations ran at 4 frames a second.
+            ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_int)(interval)(0)
 
     def client_size(self) -> tuple[int, int]:
         rect = RECT()
@@ -576,6 +593,14 @@ class GLBoard(tk.Frame):
         self._paint_due = ctypes.c_int(0)
         self._press_n = ctypes.c_int(0)
         self._busy = ctypes.c_int(0)
+        self._hover_x = ctypes.c_int(-1)
+        self._hover_y = ctypes.c_int(-1)
+        self._hover_n = ctypes.c_int(0)
+        self._seen_hover = 0
+        self._hand = ctypes.c_int(0)
+        # (x, y, region, height, plane region) for the latest press, worked
+        # out once from the depth buffer like -[MBCBoardView mouseDown:].
+        self._press_info = None
         self._seen_press = 0
         self._manip = None
         self.on_click_at = None
@@ -599,8 +624,13 @@ class GLBoard(tk.Frame):
     def _poll_clicks(self) -> None:
         if self._press_n.value != self._seen_press:
             self._seen_press = self._press_n.value
-            if self._left_down.value and self.region_at(self._press_x.value, self._press_y.value) == REGION_FRAME:
+            self._press_info = None
+            info = self.press_info(self._press_x.value, self._press_y.value)
+            if self._left_down.value and info[0] == REGION_FRAME:
                 self._start_manipulation()
+        if self._hover_n.value != self._seen_hover and self._manip is None:
+            self._seen_hover = self._hover_n.value
+            self._update_cursor()
         if self._manip is not None:
             if self._left_down.value:
                 self._manipulate()
@@ -646,22 +676,54 @@ class GLBoard(tk.Frame):
         self.after_idle(self.redraw)
 
     def set_busy(self, busy: bool) -> None:
-        if bool(self._busy.value) == busy:
-            return
+        # The original keeps the normal cursor while Sjeng thinks.
         self._busy.value = 1 if busy else 0
-        if self.gl is not None and self._manip is None:
-            self.gl.SetCursor(self.gl.LoadCursorW(None, ctypes.c_void_p(32514 if busy else 32512)))
 
-    def region_at(self, px: int, py: int) -> int | None:
-        """-[MBCBoardView positionToSquareOrRegion:] for a window point.
+    def _update_cursor(self) -> None:
+        """-[MBCBoardView mouseMoved:]: a hand over the frame, else an arrow."""
+        x, y = self._hover_x.value, self._hover_y.value
+        hand = 1 if x >= 0 and self.region_at(x, y) == REGION_FRAME else 0
+        if hand == self._hand.value or self.gl is None:
+            return
+        self._hand.value = hand
+        point = wintypes.POINT()
+        if self.gl.GetCursorPos(ctypes.byref(point)) and self.gl.WindowFromPoint(point) == self.gl.hwnd:
+            self.gl.SetCursor(self.gl.LoadCursorW(None, ctypes.c_void_p(IDC_HAND if hand else IDC_ARROW)))
 
-        Returns a square 0-63, a hand piece (128 + code), a promotion piece
-        (113 white, 114 black), the frame (115), or None.
-        """
-        point = self.hit_point(px, py)
-        if point is None:
+    def world_at(self, px: int, py: int) -> tuple[float, float, float] | None:
+        """MBCUnProjector::UnProject(view): the frontmost point under the
+        mouse, from the depth buffer of a freshly drawn frame."""
+        if not self._ready or self.gl is None:
             return None
-        x, z = point
+        gl = self.gl
+        try:
+            gl.make_current()
+            self._paint()
+            width, height = self.view_w, self.view_h
+            if not (0 <= px < width and 0 <= py < height):
+                return None
+            win_y = height - 1 - py
+            depth = ctypes.c_float(1.0)
+            gl.glReadPixels(px, win_y, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, ctypes.byref(depth))
+            if depth.value >= 0.99999:
+                return None
+            viewport = (ctypes.c_int * 4)()
+            model = (ctypes.c_double * 16)()
+            proj = (ctypes.c_double * 16)()
+            gl.glGetIntegerv(GL_VIEWPORT, viewport)
+            gl.glGetDoublev(GL_MODELVIEW_MATRIX, model)
+            gl.glGetDoublev(GL_PROJECTION_MATRIX, proj)
+            out = (ctypes.c_double * 3)()
+            if not gl.gluUnProject(float(px), float(win_y), float(depth.value), model, proj, viewport,
+                                   ctypes.byref(out, 0), ctypes.byref(out, 8), ctypes.byref(out, 16)):
+                return None
+            return out[0], out[1], out[2]
+        except Exception as exc:
+            self._error = str(exc)
+            return None
+
+    def region_of(self, x: float, z: float) -> int | None:
+        """-[MBCBoardView positionToSquareOrRegion:] for a board position."""
         promo = self.scene.promo_piece
         if promo is not None:
             if promo[0] == BLACK and abs(x - 50.0) < 8.0 and abs(z - 35.0) < 8.0:
@@ -681,6 +743,38 @@ class GLBoard(tk.Frame):
         file = min(int((x + 40.0) / 10.0), 7)
         rank = min(int((40.0 - z) / 10.0), 7)
         return rank * 8 + file
+
+    def press_info(self, px: int, py: int) -> tuple[int | None, float, int | None]:
+        """What a mouse press at (px, py) hit: (region, height, plane region).
+
+        The region comes from the frontmost surface, so the top of a tall
+        piece picks that piece and not the square behind it. The height is
+        what mouseDown: tests (pieces start a selection only when hit at
+        y >= 0.1), and the plane region is mouseToPositionIgnoringY:, which
+        mouseDown: falls back to when the press lands on the picked piece.
+        """
+        cached = self._press_info
+        if cached is not None and cached[0] == px and cached[1] == py:
+            return cached[2], cached[3], cached[4]
+        plane = self.region_at(px, py)
+        point = self.world_at(px, py)
+        if point is None:
+            info = (plane, 0.0, plane)
+        else:
+            info = (self.region_of(point[0], point[2]), point[1], plane)
+        self._press_info = (px, py) + info
+        return info
+
+    def region_at(self, px: int, py: int) -> int | None:
+        """-[MBCBoardView positionToSquareOrRegion:] for a window point.
+
+        Returns a square 0-63, a hand piece (128 + code), a promotion piece
+        (113 white, 114 black), the frame (115), or None.
+        """
+        point = self.hit_point(px, py)
+        if point is None:
+            return None
+        return self.region_of(point[0], point[1])
 
     def _start_manipulation(self) -> None:
         """mouseDown: on the frame starts fInBoardManipulation."""
@@ -737,9 +831,14 @@ class GLBoard(tk.Frame):
         if msg == 0x0084 or msg == 0x0014:
             return 1
         if msg == 0x0020 and self.gl is not None and (lparam & 0xFFFF) == 1:
-            # WM_SETCURSOR over the client area: hourglass while the computer thinks.
-            self.gl.SetCursor(self.gl.LoadCursorW(None, ctypes.c_void_p(32514 if self._busy.value else 32512)))
+            # WM_SETCURSOR over the client area: the hand over the frame.
+            self.gl.SetCursor(self.gl.LoadCursorW(None, ctypes.c_void_p(IDC_HAND if self._hand.value else IDC_ARROW)))
             return 1
+        if msg == 0x0200 and not self._left_down.value:
+            self._hover_x.value = ctypes.c_short(lparam & 0xFFFF).value
+            self._hover_y.value = ctypes.c_short((lparam >> 16) & 0xFFFF).value
+            self._hover_n.value += 1
+            return 0
         if msg == 0x000F and self.gl is not None:
             # Validate only, so the Static class does not paint over the board,
             # and let _poll_clicks redraw on the Tk side.
@@ -1294,7 +1393,7 @@ class GLBoard(tk.Frame):
 
     def _draw_hand(self) -> None:
         """-[MBCBoardView drawPiecesInHand]: counts from 2 up on the frame
-        at x 42-45, and the pieces at x 51, scaled 0.85."""
+        at x 42-45, and the pieces at x 51, scaled by kScale = 0.95."""
         pos = self.scene.pos
         gl = self.gl
         azimuth = self.scene.azimuth % 360.0
@@ -1336,7 +1435,7 @@ class GLBoard(tk.Frame):
             for index, kind in enumerate(HAND_ORDER):
                 code = kind | side
                 if pos.hand[code] - (1 if held == code else 0) > 0:
-                    self._piece(code, (51.0, 0.0, sign * (7.0 + 8.0 * index)), 0.85, 1.0)
+                    self._piece(code, (51.0, 0.0, sign * (7.0 + 8.0 * index)), 0.95, 1.0)
 
     def _draw_promotion_piece(self) -> None:
         """-[MBCBoardView drawPromotionPiece]: the default promotion piece

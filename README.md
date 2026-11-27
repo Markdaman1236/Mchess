@@ -20,6 +20,11 @@ The port was made by studying Apple's Chess.app binary in IDA Pro, together with
 - **Game variants:** Regular, Crazyhouse, Suicide and Losers.
 - **Speech:** moves are spoken in the original's wording, such as "Knight g1 to f3" or "check!", using the Windows voices. Moves can also be spoken to the game.
 - **Files:** saved games use the original `.game` format and can also be saved as PGN.
+- **Windows and documents:** each game has its own window, as on the Mac. A saved game writes itself back to its file after every move, and the games open when you quit come back the next time Chess starts.
+- **Picking pieces:** clicks are tested against the pieces themselves, as on the Mac, so clicking the top of a tall piece picks that piece rather than the square behind it.
+- **Human vs Human:** the board turns round after each move so the next player faces their own pieces.
+- **Game log:** the Mac's seven-column move table, with the players' names and an Edit Game Info… button. It slides out from the side of the board.
+- **Menus and About window:** laid out like the Mac's (Chess, Game, Edit, Moves, Window, Help), with Apple's icon.
 
 The rest of the window is built with Tk, so the menus and dialogs look like Windows rather than macOS.
 
@@ -29,7 +34,7 @@ The rest of the window is built with Tk, so the menus and dialogs look like Wind
 
 | Action | How |
 |---|---|
-| Move a piece | Click the piece, then click the square. Or drag the piece to the square. |
+| Move a piece | Click the piece, then click the square. Or drag the piece to the square. As on the Mac, you have to click the piece itself, not the square it stands on. |
 | Type a move | Type the from-square, then the to-square, for example `e2` then `e4`. |
 | Cancel a selection | Click the piece again, or press **Enter** or **Backspace**. |
 | Choose the promotion piece | Click the spare piece beside the board to cycle Queen → Knight → Rook → Bishop, or type `=q`, `=n`, `=r` or `=b`. |
@@ -48,13 +53,15 @@ The cursor hides while you hold the button. The view briefly settles when a side
 
 | Shortcut | Action |
 |---|---|
-| Ctrl+N | New game: choose players, variant and difficulty |
+| Ctrl+N | New game in a new window: choose players, variant and difficulty |
 | Ctrl+O / Ctrl+S / Ctrl+Shift+S | Open, Save, Save As |
-| Ctrl+Z | Take back a move |
-| Ctrl+] | Show a hint (red arrow) |
+| Ctrl+W | Close the window |
+| Ctrl+Z | Take back a move (two moves, as on the Mac) |
+| Ctrl+] | Show a hint (red arrow), once the computer has started thinking about your move |
 | Ctrl+[ | Show the last move (blue arrow) |
 | Ctrl+L | Show or hide the game log |
 | Ctrl+, | Preferences: board and piece styles, voices, difficulty |
+| Ctrl+M | Minimise |
 | F11 | Full screen |
 | Ctrl+Q | Quit |
 
@@ -66,6 +73,8 @@ Turn on **Allow Player to Speak Moves** in Preferences, then say:
 - "Castle kingside" or "Castle queenside"
 - "Drop knight at c7" (Crazyhouse only)
 - "Take back move"
+
+As on the Mac, the game only listens on your turn, in the window you're using, and only for moves that are legal at that point.
 
 ## Difficulty
 
@@ -105,7 +114,8 @@ To check the chess rules, run `python test_rules.py`.
 
 | File | Purpose |
 |---|---|
-| `chess_app.py` | Window, menus, dialogs, input, speech and game flow |
+| `chess_app.py` | The app and its game windows, menus, dialogs, input, speech and game flow |
+| `log_view.py` | The game log drawer and move table |
 | `board_gl.py` | The OpenGL board, pieces, lighting and camera |
 | `chess_rules.py` | Move generation and the rules for all four variants |
 | `sjeng_engine.py`, `chess_engine.py` | Connection to Sjeng, plus a small Python engine used as a fallback |
